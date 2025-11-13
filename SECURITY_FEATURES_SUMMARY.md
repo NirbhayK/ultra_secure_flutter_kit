@@ -45,7 +45,7 @@
 - ✅ **Proxy/VPN Detection** - Identifies network proxies and VPNs
 - ✅ **Network Monitoring** - Real-time network security monitoring
 
-**Implementation / Limitations**: SSL pinning is only effective if the correct certificate or public-key hashes are configured and kept up to date (certificate rotation will require updating pins). The plugin validates the server trust during the TLS handshake. For critical use cases, combine pinning with server-side certificate validation and short-lived pins/tokens.
+**Implementation / Limitations**: SSL pinning is only effective if the correct certificate hashes or public key hashes are configured and kept up to date (certificate rotation will require updating pins). The plugin validates the server trust during the TLS handshake. For critical use cases, combine pinning with server-side certificate validation and short-lived pins/tokens.
 
 #### 5. **Anti-Reverse Engineering** ✅
 - ✅ **Frida Detection** - Detects Frida framework usage
