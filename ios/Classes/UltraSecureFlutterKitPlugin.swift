@@ -100,8 +100,12 @@ public class UltraSecureFlutterKitPlugin: NSObject, FlutterPlugin {
 
   // MARK: - SSL Pinning Verification
   private func verifySSLPinning(url: String) -> Bool {
-    guard let urlObj = URL(string: url), urlObj.scheme == "https" else {
-      print("Security: Invalid or non-HTTPS URL for SSL pinning verification")
+    guard let urlObj = URL(string: url) else {
+      print("Security: Invalid URL format for SSL pinning verification: \(url)")
+      return false
+    }
+    guard urlObj.scheme == "https" else {
+      print("Security: HTTP (non-HTTPS) URL not allowed for SSL pinning verification: \(url)")
       return false
     }
 
