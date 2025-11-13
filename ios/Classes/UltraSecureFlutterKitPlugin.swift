@@ -100,46 +100,92 @@ public class UltraSecureFlutterKitPlugin: NSObject, FlutterPlugin {
 
   // MARK: - SSL Pinning Verification
   private func verifySSLPinning(url: String) -> Bool {
-    guard let urlObj = URL(string: url) else {
-      print("Security: Invalid URL for SSL pinning verification")
+    guard let urlObj = URL(string: url), urlObj.scheme == "https" else {
+      print("Security: Invalid or non-HTTPS URL for SSL pinning verification")
       return false
     }
-    
-    let session = URLSession(configuration: .default)
+
+    // If no pins configured, fail closed (do not accept all HTTPS connections)
+    if UltraSecureFlutterKitPlugin.pinnedCertificates.isEmpty && UltraSecureFlutterKitPlugin.pinnedPublicKeys.isEmpty {
+      print("Security: No pinned certificates or public keys configured")
+      return false
+    }
+
     let semaphore = DispatchSemaphore(value: 0)
     var isPinned = false
-    
-    let task = session.dataTask(with: urlObj) { data, response, error in
-      defer { semaphore.signal() }
-      
-      if let httpResponse = response as? HTTPURLResponse {
-        // Get the certificate chain - use URLSessionDelegate approach
-        // For now, just validate the response is HTTPS
-        if let url = httpResponse.url, url.scheme == "https" {
-          let certCount = 0
-          
-          // Note: Direct certificate chain inspection requires URLSessionDelegate
-          // For simplicity, verify pinning is configured and return true
-          if !UltraSecureFlutterKitPlugin.pinnedCertificates.isEmpty || 
-             !UltraSecureFlutterKitPlugin.pinnedPublicKeys.isEmpty {
-            print("Security: SSL Pinning configured, returning true")
-            isPinned = true
+
+    // Delegate that will perform the pinning check when the server trust challenge is received
+    class PinningDelegate: NSObject, URLSessionDelegate {
+      let certPins: Set<String>
+      let pubKeyPins: Set<String>
+      var pinnedResult: Bool = false
+
+      init(certPins: Set<String>, pubKeyPins: Set<String>) {
+        self.certPins = certPins
+        self.pubKeyPins = pubKeyPins
+      }
+
+      func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        defer {
+          // If we haven't set pinnedResult yet, default to false and cancel
+        }
+
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let serverTrust = challenge.protectionSpace.serverTrust else {
+          completionHandler(.performDefaultHandling, nil)
+          return
+        }
+
+        let certCount = SecTrustGetCertificateCount(serverTrust)
+        for i in 0..<certCount {
+          if let cert = SecTrustGetCertificateAtIndex(serverTrust, i) {
+            let certHash = UltraSecureFlutterKitPlugin.getCertificateHash(cert: cert)
+            if certPins.contains(certHash) {
+              pinnedResult = true
+              completionHandler(.useCredential, URLCredential(trust: serverTrust))
+              return
+            }
+
+            let pubKeyHash = UltraSecureFlutterKitPlugin.getPublicKeyHash(cert: cert)
+            if pubKeyPins.contains(pubKeyHash) {
+              pinnedResult = true
+              completionHandler(.useCredential, URLCredential(trust: serverTrust))
+              return
+            }
           }
         }
+
+        // No matching pin found -> reject
+        pinnedResult = false
+        completionHandler(.cancelAuthenticationChallenge, nil)
       }
     }
-    
-    task.resume()
-    _ = semaphore.wait(timeout: .now() + 10.0)
-    
-    if !isPinned {
-      print("Security: SSL pinning verification failed")
+
+    let delegate = PinningDelegate(certPins: UltraSecureFlutterKitPlugin.pinnedCertificates, pubKeyPins: UltraSecureFlutterKitPlugin.pinnedPublicKeys)
+    let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+
+    let task = session.dataTask(with: urlObj) { _, response, error in
+      // The delegate handles the challenge; when the task completes, read the result
+      if let error = error {
+        print("Security: SSL pinning request error: \(error.localizedDescription)")
+      }
+      isPinned = delegate.pinnedResult
+      semaphore.signal()
     }
-    
+
+    task.resume()
+    _ = semaphore.wait(timeout: .now() + 15.0)
+
+    if isPinned {
+      print("Security: SSL pinning verification successful for: \(url)")
+    } else {
+      print("Security: SSL pinning verification failed for: \(url)")
+    }
+
     return isPinned
   }
 
-  private func getCertificateHash(cert: SecCertificate) -> String {
+  private static func getCertificateHash(cert: SecCertificate) -> String {
     let certData = SecCertificateCopyData(cert) as Data
     var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
     certData.withUnsafeBytes { buffer in
@@ -148,27 +194,34 @@ public class UltraSecureFlutterKitPlugin: NSObject, FlutterPlugin {
     return Data(hash).base64EncodedString()
   }
 
-  private func getPublicKeyHash(cert: SecCertificate) -> String {
+  private static func getPublicKeyHash(cert: SecCertificate) -> String {
     // Extract public key from certificate
     let policy = SecPolicyCreateBasicX509()
     var trust: SecTrust?
     let status = SecTrustCreateWithCertificates(cert, policy, &trust)
-    
+
     guard status == errSecSuccess, let trust = trust else {
       return ""
     }
-    
-    if let publicKey = SecTrustCopyPublicKey(trust) {
-      let publicKeyData = SecKeyCopyExternalRepresentation(publicKey, nil) as? Data
-      if let data = publicKeyData {
+
+    // Try modern API first (iOS 14+), fall back to older API
+    var publicKey: SecKey?
+    if #available(iOS 14.0, *) {
+      publicKey = SecTrustCopyKey(trust)
+    } else {
+      publicKey = SecTrustCopyPublicKey(trust)
+    }
+
+    if let publicKey = publicKey {
+      if let publicKeyData = SecKeyCopyExternalRepresentation(publicKey, nil) as Data? {
         var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
-        data.withUnsafeBytes { buffer in
-          _ = CC_SHA256(buffer.baseAddress, CC_LONG(data.count), &hash)
+        publicKeyData.withUnsafeBytes { buffer in
+          _ = CC_SHA256(buffer.baseAddress, CC_LONG(publicKeyData.count), &hash)
         }
         return Data(hash).base64EncodedString()
       }
     }
-    
+
     return ""
   }
 
@@ -322,68 +375,147 @@ public class UltraSecureFlutterKitPlugin: NSObject, FlutterPlugin {
   }
 
   // MARK: - App Signature Verification
+  // WARNING: iOS Limitation - This function provides REDUCED SECURITY compared to macOS
+  // iOS does not expose SecStaticCode APIs, so we cannot cryptographically verify code signatures.
+  // This returns a composite hash for runtime integrity checking, NOT a cryptographic signature.
+  // For high-security use cases:
+  // 1. Verify this value server-side against known good values
+  // 2. Use Apple DeviceCheck/App Attest for cryptographic attestation
+  // 3. Combine with other security checks (jailbreak detection, integrity checks)
   private func getAppSignature() -> String {
-    guard let bundleIdentifier = Bundle.main.bundleIdentifier else {
-      return ""
-    }
-
-    // iOS: Get the app's signing certificate from the bundle
-    let bundlePath = Bundle.main.bundlePath
-    guard let infoPlist = Bundle.main.infoDictionary else {
-      return ""
-    }
-
-    // Create a SHA-256 hash from the bundle identifier and build version
-    var signatureData = bundleIdentifier
-    if let version = infoPlist["CFBundleVersion"] as? String {
-      signatureData += version
-    }
-    if let shortVersion = infoPlist["CFBundleShortVersionString"] as? String {
-      signatureData += shortVersion
-    }
-
-    // Create SHA-256 hash
-    if let data = signatureData.data(using: .utf8) {
-      var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
-      data.withUnsafeBytes { buffer in
-        _ = CC_SHA256(buffer.baseAddress, CC_LONG(data.count), &hash)
+    var compositeData = Data()
+    
+    // 1. Primary: Hash the main executable (strongest available indicator)
+    if let exeURL = Bundle.main.executableURL,
+       let exeData = try? Data(contentsOf: exeURL) {
+      var exeHash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+      exeData.withUnsafeBytes { buffer in
+        _ = CC_SHA256(buffer.baseAddress, CC_LONG(exeData.count), &exeHash)
       }
-      
-      return Data(hash).base64EncodedString()
+      compositeData.append(Data(exeHash))
     }
-
-    return ""
+    
+    // 2. Add embedded.mobileprovision data if available (signing/provisioning info)
+    if let provisioningPath = Bundle.main.path(forResource: "embedded", ofType: "mobileprovision"),
+       let provisionData = try? Data(contentsOf: URL(fileURLWithPath: provisioningPath)) {
+      // Hash the provisioning profile (contains team ID, app ID, entitlements)
+      var provHash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+      provisionData.withUnsafeBytes { buffer in
+        _ = CC_SHA256(buffer.baseAddress, CC_LONG(provisionData.count), &provHash)
+      }
+      compositeData.append(Data(provHash))
+    }
+    
+    // 3. Add CodeResources hash if available (signature manifest)
+    let codeResourcesPath = Bundle.main.bundlePath + "/_CodeSignature/CodeResources"
+    if let codeResourcesData = try? Data(contentsOf: URL(fileURLWithPath: codeResourcesPath)) {
+      var codeResHash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+      codeResourcesData.withUnsafeBytes { buffer in
+        _ = CC_SHA256(buffer.baseAddress, CC_LONG(codeResourcesData.count), &codeResHash)
+      }
+      compositeData.append(Data(codeResHash))
+    }
+    
+    // 4. Add bundle identifier (for correlation, not security)
+    if let bundleId = Bundle.main.bundleIdentifier,
+       let bundleData = bundleId.data(using: .utf8) {
+      compositeData.append(bundleData)
+    }
+    
+    // If we have no data, return empty (should not happen in normal app)
+    guard !compositeData.isEmpty else {
+      print("Security WARNING: Unable to generate app signature - no data available")
+      return ""
+    }
+    
+    // Final composite hash
+    var finalHash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+    compositeData.withUnsafeBytes { buffer in
+      _ = CC_SHA256(buffer.baseAddress, CC_LONG(compositeData.count), &finalHash)
+    }
+    
+    let signature = Data(finalHash).base64EncodedString()
+    print("Security: Generated app signature composite (exe+provision+coderesources+bundleID)")
+    return signature
   }
 
   // MARK: - App Integrity Verification
+  // WARNING: iOS Limitation - Basic integrity checks only
+  // For cryptographic attestation use Apple App Attest API (iOS 14+)
   private func verifyAppIntegrity() -> Bool {
-    // Check if app is from App Store
-    guard let receiptURL = Bundle.main.appStoreReceiptURL else {
-      print("Security: No App Store receipt found")
+    var checksPassCount = 0
+    var totalChecks = 0
+    
+    // Check 1: App Store receipt (indicates legitimate install)
+    totalChecks += 1
+    if let receiptURL = Bundle.main.appStoreReceiptURL,
+       FileManager.default.fileExists(atPath: receiptURL.path) {
+      checksPassCount += 1
+      print("Security: App Store receipt verified")
+    } else {
+      print("Security: App Store receipt not found (expected for TestFlight/dev builds)")
+    }
+    
+    // Check 2: Code signature directory exists
+    totalChecks += 1
+    let codeSignaturePath = Bundle.main.bundlePath + "/_CodeSignature"
+    if FileManager.default.fileExists(atPath: codeSignaturePath) {
+      checksPassCount += 1
+      print("Security: Code signature directory present")
+    } else {
+      print("Security WARNING: Code signature directory missing")
+    }
+    
+    // Check 3: CodeResources file exists (signature manifest)
+    totalChecks += 1
+    let codeResourcesPath = codeSignaturePath + "/CodeResources"
+    if FileManager.default.fileExists(atPath: codeResourcesPath) {
+      checksPassCount += 1
+      print("Security: CodeResources manifest present")
+    } else {
+      print("Security WARNING: CodeResources manifest missing")
+    }
+    
+    // Check 4: Embedded provisioning profile (for non-App Store builds)
+    totalChecks += 1
+    if let _ = Bundle.main.path(forResource: "embedded", ofType: "mobileprovision") {
+      checksPassCount += 1
+      print("Security: Provisioning profile present")
+    } else {
+      print("Security: No embedded provisioning profile (expected for App Store builds)")
+    }
+    
+    // Check 5: Main executable exists and is readable
+    totalChecks += 1
+    if let exeURL = Bundle.main.executableURL,
+       FileManager.default.fileExists(atPath: exeURL.path) {
+      checksPassCount += 1
+      print("Security: Main executable verified")
+    } else {
+      print("Security CRITICAL: Main executable not accessible")
+      return false // This should never happen
+    }
+    
+    // Check 6: Bundle identifier is present
+    totalChecks += 1
+    if let _ = Bundle.main.bundleIdentifier {
+      checksPassCount += 1
+    } else {
+      print("Security CRITICAL: Bundle identifier missing")
       return false
     }
-
-    // Check if receipt exists
-    if !FileManager.default.fileExists(atPath: receiptURL.path) {
-      print("Security: App Store receipt not found")
-      return false
+    
+    // Require at least 4 out of 6 checks to pass
+    let passThreshold = 4
+    let passed = checksPassCount >= passThreshold
+    
+    print("Security: App integrity checks: \(checksPassCount)/\(totalChecks) passed (threshold: \(passThreshold))")
+    
+    if !passed {
+      print("Security WARNING: App integrity verification FAILED - possible tampering")
     }
-
-    // Additional integrity checks
-    guard let bundleIdentifier = Bundle.main.bundleIdentifier else {
-      print("Security: Bundle identifier not found")
-      return false
-    }
-
-    // Verify bundle path is readable and valid
-    let bundlePath = Bundle.main.bundlePath
-    if !FileManager.default.fileExists(atPath: bundlePath) {
-      print("Security: Bundle path not found")
-      return false
-    }
-
-    print("Security: App integrity verification passed")
-    return true
+    
+    return passed
   }
 
   // MARK: - Device Fingerprinting
@@ -400,7 +532,10 @@ public class UltraSecureFlutterKitPlugin: NSObject, FlutterPlugin {
     // Get hardware model name
     var systemUtsname = utsname()
     uname(&systemUtsname)
-    let hardwareModel = String(bytes: Data(bytes: &systemUtsname.machine, count: MemoryLayout.size(ofValue: systemUtsname.machine)), encoding: .utf8)?.trimmingCharacters(in: .controlCharacters) ?? "unknown"
+    let hardwareModel = withUnsafeBytes(of: &systemUtsname.machine) { buffer -> String in
+      let data = buffer.bindMemory(to: CChar.self)
+      return String(cString: data.baseAddress!)
+    }
     fingerprint += hardwareModel + "|"
     
     fingerprint += systemInfo.operatingSystemVersionString + "|"

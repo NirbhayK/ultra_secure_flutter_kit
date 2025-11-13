@@ -14,12 +14,22 @@
 
 **Implementation**: Native Android (Kotlin) and iOS (Swift) implementations with comprehensive detection algorithms.
 
-#### 2. **App Tampering Detection** ✅
-- ✅ **Signature Verification** - Verifies app signature integrity
-- ✅ **Integrity Checks** - Validates app checksums and hashes
-- ✅ **Installation Source Verification** - Ensures app is from official stores
+#### 2. **App Tampering Detection** ⚠️ (iOS Limited)
+- ⚠️ **App Fingerprinting** - Returns a composite hash of the main executable, embedded provisioning profile, code signature manifest, and bundle ID. **This is NOT a cryptographic signature verification** - iOS does not expose the SecStaticCode APIs available on macOS.
+- ✅ **Integrity Checks** - Validates presence of code signature directory, CodeResources manifest, App Store receipt (when applicable), and main executable accessibility. Requires 4/6 checks to pass.
+- ✅ **Installation Source Verification** - Checks for App Store receipt where applicable.
 
-**Implementation**: Platform-specific signature verification and integrity checks.
+**CRITICAL iOS Limitations**:
+- ⚠️ **No Cryptographic Signature Verification**: iOS does not provide APIs to cryptographically verify code signatures like macOS does. The `getAppSignature()` method returns a composite hash for runtime integrity checking, but this can potentially be replicated by an attacker with physical access.
+- ⚠️ **Reduced Tamper Detection**: Without access to secure boot chain verification, determined attackers with jailbroken devices may bypass these checks.
+
+**Recommended Mitigations**:
+1. **Server-Side Verification**: Send the app fingerprint to your backend and verify it matches known-good values for your app version.
+2. **Apple App Attest** (iOS 14+): Use Apple's Device Check and App Attest APIs for cryptographic attestation of your app's authenticity. This provides hardware-backed proof that your unmodified app is running.
+3. **Layered Security**: Combine with jailbreak detection, network security, and runtime behavior monitoring.
+4. **DeviceCheck Integration**: Use Apple's DeviceCheck framework to maintain device-specific integrity state on your servers.
+
+**Implementation Notes**: The plugin checks for App Store receipts, code signature files, provisioning profiles, and executable integrity. For production apps requiring high assurance, implement Apple App Attest server-side verification.
 
 #### 3. **Secure Storage Layer** ✅
 - ✅ **AES-256 Encrypted Storage** - Secure data storage with encryption
@@ -30,12 +40,12 @@
 **Implementation**: Dart-based encryption service with platform integration.
 
 #### 4. **Network Protection** ✅
-- ✅ **SSL Pinning** - Certificate pinning with fallback options
-- ✅ **MITM Attack Detection** - Detects man-in-the-middle attacks
+- ✅ **SSL Pinning** - Certificate/public-key pinning using platform SecTrust evaluation. Requires you to configure pinned certificate or public-key hashes. The plugin enforces pins by comparing the server certificate chain during TLS handshake; if no pins are configured the connection will be rejected (fail-closed).
+- ✅ **MITM Attack Detection** - Detects common indicators of man-in-the-middle attacks (best-effort).
 - ✅ **Proxy/VPN Detection** - Identifies network proxies and VPNs
 - ✅ **Network Monitoring** - Real-time network security monitoring
 
-**Implementation**: Platform-specific network monitoring and SSL pinning.
+**Implementation / Limitations**: SSL pinning is only effective if the correct certificate or public-key hashes are configured and kept up to date (certificate rotation will require updating pins). The plugin validates the server trust during the TLS handshake. For critical use cases, combine pinning with server-side certificate validation and short-lived pins/tokens.
 
 #### 5. **Anti-Reverse Engineering** ✅
 - ✅ **Frida Detection** - Detects Frida framework usage

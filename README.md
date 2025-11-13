@@ -29,10 +29,11 @@ A comprehensive Flutter security package providing enterprise-grade protection s
 - ✅ **Secure Flag Toggle** - Enables secure window flags
 - ✅ **Developer Mode Detection** - Detects if developer options are enabled
 
-#### 2. **App Tampering Detection**
-- ✅ **Signature Verification** - Verifies app signature integrity
-- ✅ **Integrity Checks** - Validates app checksums and hashes
-- ✅ **Installation Source Verification** - Ensures app is from official stores
+#### 2. **App Tampering Detection** ⚠️
+- ⚠️ **App Fingerprinting** - Composite hash (executable + provisioning + code signature). **iOS: Not cryptographic signature verification** (use Apple App Attest for high security)
+- ✅ **Integrity Checks** - Validates code signature presence, App Store receipt, and executable integrity
+- ✅ **Installation Source Verification** - Checks App Store receipt where applicable
+- ⚠️ **iOS Limitation**: Requires server-side verification or Apple App Attest for production security
 
 #### 3. **Secure Storage Layer**
 - ✅ **AES-256 Encrypted Storage** - Secure data storage with encryption
